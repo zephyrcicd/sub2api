@@ -102,6 +102,45 @@ func TestAPIContracts(t *testing.T) {
 			}`,
 		},
 		{
+			name:   "POST /api/v1/keys with expires_at",
+			method: http.MethodPost,
+			path:   "/api/v1/keys",
+			body:   `{"name":"Short-lived key","custom_key":"sk_short_lived_123456","expires_at":"2025-01-02T03:09:05Z"}`,
+			headers: map[string]string{
+				"Content-Type": "application/json",
+			},
+			wantStatus: http.StatusOK,
+			wantJSON: `{
+				"code": 0,
+				"message": "success",
+				"data": {
+					"id": 100,
+					"user_id": 1,
+					"key": "sk_short_lived_123456",
+					"name": "Short-lived key",
+					"group_id": null,
+					"status": "active",
+					"ip_whitelist": null,
+					"ip_blacklist": null,
+					"last_used_at": null,
+					"quota": 0,
+					"quota_used": 0,
+					"rate_limit_5h": 0,
+					"rate_limit_1d": 0,
+					"rate_limit_7d": 0,
+					"usage_5h": 0,
+					"usage_1d": 0,
+					"usage_7d": 0,
+					"window_5h_start": null,
+					"window_1d_start": null,
+					"window_7d_start": null,
+					"expires_at": "2025-01-02T03:09:05Z",
+					"created_at": "2025-01-02T03:04:05Z",
+					"updated_at": "2025-01-02T03:04:05Z"
+				}
+			}`,
+		},
+		{
 			name: "GET /api/v1/keys (paginated)",
 			setup: func(t *testing.T, deps *contractDeps) {
 				t.Helper()

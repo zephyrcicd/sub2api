@@ -37,6 +37,7 @@ type CreateAPIKeyRequest struct {
 	IPBlacklist   []string `json:"ip_blacklist"`    // IP 黑名单
 	Quota         *float64 `json:"quota"`           // 配额限制 (USD)
 	ExpiresInDays *int     `json:"expires_in_days"` // 过期天数
+	ExpiresAt     *string  `json:"expires_at"`      // 精确过期时间 (ISO 8601)
 
 	// Rate limit fields (0 = unlimited)
 	RateLimit5h *float64 `json:"rate_limit_5h"`
@@ -139,7 +140,7 @@ func (h *APIKeyHandler) GetByID(c *gin.Context) {
 }
 
 // Create handles creating a new API key
-// POST /api/v1/api-keys
+// POST /api/v1/keys
 func (h *APIKeyHandler) Create(c *gin.Context) {
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
@@ -160,6 +161,14 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 		IPWhitelist:   req.IPWhitelist,
 		IPBlacklist:   req.IPBlacklist,
 		ExpiresInDays: req.ExpiresInDays,
+	}
+	if req.ExpiresAt != nil {
+		t, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if err != nil {
+			response.BadRequest(c, "Invalid expires_at format: "+err.Error())
+			return
+		}
+		svcReq.ExpiresAt = &t
 	}
 	if req.Quota != nil {
 		svcReq.Quota = *req.Quota
@@ -184,7 +193,7 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 }
 
 // Update handles updating an API key
-// PUT /api/v1/api-keys/:id
+// PUT /api/v1/keys/:id
 func (h *APIKeyHandler) Update(c *gin.Context) {
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {

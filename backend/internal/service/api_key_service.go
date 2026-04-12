@@ -158,6 +158,7 @@ type CreateAPIKeyRequest struct {
 	// Quota fields
 	Quota         float64 `json:"quota"`           // Quota limit in USD (0 = unlimited)
 	ExpiresInDays *int    `json:"expires_in_days"` // Days until expiry (nil = never expires)
+	ExpiresAt     *time.Time
 
 	// Rate limit fields (0 = unlimited)
 	RateLimit5h float64 `json:"rate_limit_5h"`
@@ -412,7 +413,10 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 	}
 
 	// Set expiration time if specified
-	if req.ExpiresInDays != nil && *req.ExpiresInDays > 0 {
+	if req.ExpiresAt != nil {
+		expiresAt := *req.ExpiresAt
+		apiKey.ExpiresAt = &expiresAt
+	} else if req.ExpiresInDays != nil && *req.ExpiresInDays > 0 {
 		expiresAt := time.Now().AddDate(0, 0, *req.ExpiresInDays)
 		apiKey.ExpiresAt = &expiresAt
 	}

@@ -1514,19 +1514,9 @@ const handleSubmit = async () => {
   const quota = formData.value.quota && formData.value.quota > 0 ? formData.value.quota : 0
 
   // Calculate expiration
-  let expiresInDays: number | undefined
   let expiresAt: string | null | undefined
   if (formData.value.enable_expiration && formData.value.expiration_date) {
-    if (!showEditModal.value) {
-      // Create mode: calculate days from date
-      const expDate = new Date(formData.value.expiration_date)
-      const now = new Date()
-      const diffDays = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
-      expiresInDays = diffDays > 0 ? diffDays : 1
-    } else {
-      // Edit mode: use custom date directly
-      expiresAt = new Date(formData.value.expiration_date).toISOString()
-    }
+    expiresAt = new Date(formData.value.expiration_date).toISOString()
   } else if (showEditModal.value) {
     // Edit mode: if expiration disabled or date cleared, send empty string to clear
     expiresAt = ''
@@ -1557,16 +1547,18 @@ const handleSubmit = async () => {
       appStore.showSuccess(t('keys.keyUpdatedSuccess'))
     } else {
       const customKey = formData.value.use_custom_key ? formData.value.custom_key : undefined
-      await keysAPI.create(
-        formData.value.name,
-        formData.value.group_id,
-        customKey,
-        ipWhitelist,
-        ipBlacklist,
+      await keysAPI.create({
+        name: formData.value.name,
+        group_id: formData.value.group_id,
+        custom_key: customKey,
+        ip_whitelist: ipWhitelist,
+        ip_blacklist: ipBlacklist,
         quota,
-        expiresInDays,
-        rateLimitData
-      )
+        expires_at: expiresAt ?? undefined,
+        rate_limit_5h: rateLimitData.rate_limit_5h,
+        rate_limit_1d: rateLimitData.rate_limit_1d,
+        rate_limit_7d: rateLimitData.rate_limit_7d,
+      })
       appStore.showSuccess(t('keys.keyCreatedSuccess'))
       // Only advance tour if active, on submit step, and creation succeeded
       if (onboardingStore.isCurrentStep('[data-tour="key-form-submit"]')) {
@@ -1637,7 +1629,13 @@ const confirmResetQuota = () => {
 // Set expiration date based on quick select days
 const setExpirationDays = (days: number) => {
   formData.value.expiration_preset = days.toString() as '7' | '30' | '90'
-  const expDate = new Date()
+  const now = new Date()
+  const currentExpiration = new Date(formData.value.expiration_date)
+  const useCurrentExpiration =
+    showEditModal.value &&
+    !Number.isNaN(currentExpiration.getTime()) &&
+    currentExpiration.getTime() > now.getTime()
+  const expDate = useCurrentExpiration ? currentExpiration : now
   expDate.setDate(expDate.getDate() + days)
   formData.value.expiration_date = formatDateTimeLocal(expDate.toISOString())
 }

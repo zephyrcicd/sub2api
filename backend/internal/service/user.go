@@ -7,32 +7,44 @@ import (
 )
 
 type User struct {
-	ID            int64
-	Email         string
-	Username      string
-	Notes         string
-	PasswordHash  string
-	Role          string
-	Balance       float64
-	Concurrency   int
-	Status        string
-	AllowedGroups []int64
-	TokenVersion  int64 // Incremented on password change to invalidate existing tokens
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID             int64
+	Email          string
+	Username       string
+	Notes          string
+	AvatarURL      string
+	AvatarSource   string
+	AvatarMIME     string
+	AvatarByteSize int
+	AvatarSHA256   string
+	PasswordHash   string
+	Role           string
+	Balance        float64
+	Concurrency    int
+	Status         string
+	AllowedGroups  []int64
+	TokenVersion   int64 // Incremented on password change to invalidate existing tokens
+	SignupSource   string
+	LastLoginAt    *time.Time
+	LastActiveAt   *time.Time
+	LastUsedAt     *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 
 	// GroupRates 用户专属分组倍率配置
 	// map[groupID]rateMultiplier
 	GroupRates map[int64]float64
 
-	// Sora 存储配额
-	SoraStorageQuotaBytes int64 // 用户级 Sora 存储配额（0 表示使用分组或系统默认值）
-	SoraStorageUsedBytes  int64 // Sora 存储已用量
-
 	// TOTP 双因素认证字段
 	TotpSecretEncrypted *string    // AES-256-GCM 加密的 TOTP 密钥
 	TotpEnabled         bool       // 是否启用 TOTP
 	TotpEnabledAt       *time.Time // TOTP 启用时间
+
+	// 余额不足通知
+	BalanceNotifyEnabled       bool
+	BalanceNotifyThresholdType string // "fixed" (default) | "percentage"
+	BalanceNotifyThreshold     *float64
+	BalanceNotifyExtraEmails   []NotifyEmailEntry
+	TotalRecharged             float64
 
 	APIKeys       []APIKey
 	Subscriptions []UserSubscription

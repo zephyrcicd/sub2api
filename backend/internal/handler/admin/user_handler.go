@@ -34,14 +34,13 @@ func NewUserHandler(adminService service.AdminService, concurrencyService *servi
 
 // CreateUserRequest represents admin create user request
 type CreateUserRequest struct {
-	Email                 string  `json:"email" binding:"required,email"`
-	Password              string  `json:"password" binding:"required,min=6"`
-	Username              string  `json:"username"`
-	Notes                 string  `json:"notes"`
-	Balance               float64 `json:"balance"`
-	Concurrency           int     `json:"concurrency"`
-	AllowedGroups         []int64 `json:"allowed_groups"`
-	SoraStorageQuotaBytes int64   `json:"sora_storage_quota_bytes"`
+	Email         string  `json:"email" binding:"required,email"`
+	Password      string  `json:"password" binding:"required,min=6"`
+	Username      string  `json:"username"`
+	Notes         string  `json:"notes"`
+	Balance       float64 `json:"balance"`
+	Concurrency   int     `json:"concurrency"`
+	AllowedGroups []int64 `json:"allowed_groups"`
 }
 
 // UpdateUserRequest represents admin update user request
@@ -57,8 +56,7 @@ type UpdateUserRequest struct {
 	AllowedGroups *[]int64 `json:"allowed_groups"`
 	// GroupRates 用户专属分组倍率配置
 	// map[groupID]*rate，nil 表示删除该分组的专属倍率
-	GroupRates            map[int64]*float64 `json:"group_rates"`
-	SoraStorageQuotaBytes *int64             `json:"sora_storage_quota_bytes"`
+	GroupRates map[int64]*float64 `json:"group_rates"`
 }
 
 // UpdateBalanceRequest represents balance update request
@@ -66,6 +64,22 @@ type UpdateBalanceRequest struct {
 	Balance   float64 `json:"balance" binding:"required,gt=0"`
 	Operation string  `json:"operation" binding:"required,oneof=set add subtract"`
 	Notes     string  `json:"notes"`
+}
+
+type BindUserAuthIdentityRequest struct {
+	ProviderType    string                              `json:"provider_type"`
+	ProviderKey     string                              `json:"provider_key"`
+	ProviderSubject string                              `json:"provider_subject"`
+	Issuer          *string                             `json:"issuer"`
+	Metadata        map[string]any                      `json:"metadata"`
+	Channel         *BindUserAuthIdentityChannelRequest `json:"channel"`
+}
+
+type BindUserAuthIdentityChannelRequest struct {
+	Channel        string         `json:"channel"`
+	ChannelAppID   string         `json:"channel_app_id"`
+	ChannelSubject string         `json:"channel_subject"`
+	Metadata       map[string]any `json:"metadata"`
 }
 
 // List handles listing all users with pagination
@@ -93,12 +107,14 @@ func (h *UserHandler) List(c *gin.Context) {
 		GroupName:  strings.TrimSpace(c.Query("group_name")),
 		Attributes: parseAttributeFilters(c),
 	}
+	sortBy := c.DefaultQuery("sort_by", "created_at")
+	sortOrder := c.DefaultQuery("sort_order", "desc")
 	if raw, ok := c.GetQuery("include_subscriptions"); ok {
 		includeSubscriptions := parseBoolQueryWithDefault(raw, true)
 		filters.IncludeSubscriptions = &includeSubscriptions
 	}
 
-	users, total, err := h.adminService.ListUsers(c.Request.Context(), page, pageSize, filters)
+	users, total, err := h.adminService.ListUsers(c.Request.Context(), page, pageSize, filters, sortBy, sortOrder)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -172,6 +188,45 @@ func (h *UserHandler) GetByID(c *gin.Context) {
 	response.Success(c, dto.UserFromServiceAdmin(user))
 }
 
+// BindAuthIdentity manually binds a canonical auth identity to a user.
+// POST /api/v1/admin/users/:id/auth-identities
+func (h *UserHandler) BindAuthIdentity(c *gin.Context) {
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	var req BindUserAuthIdentityRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	input := service.AdminBindAuthIdentityInput{
+		ProviderType:    req.ProviderType,
+		ProviderKey:     req.ProviderKey,
+		ProviderSubject: req.ProviderSubject,
+		Issuer:          req.Issuer,
+		Metadata:        req.Metadata,
+	}
+	if req.Channel != nil {
+		input.Channel = &service.AdminBindAuthIdentityChannelInput{
+			Channel:        req.Channel.Channel,
+			ChannelAppID:   req.Channel.ChannelAppID,
+			ChannelSubject: req.Channel.ChannelSubject,
+			Metadata:       req.Channel.Metadata,
+		}
+	}
+
+	result, err := h.adminService.BindUserAuthIdentity(c.Request.Context(), userID, input)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 // Create handles creating a new user
 // POST /api/v1/admin/users
 func (h *UserHandler) Create(c *gin.Context) {
@@ -182,14 +237,13 @@ func (h *UserHandler) Create(c *gin.Context) {
 	}
 
 	user, err := h.adminService.CreateUser(c.Request.Context(), &service.CreateUserInput{
-		Email:                 req.Email,
-		Password:              req.Password,
-		Username:              req.Username,
-		Notes:                 req.Notes,
-		Balance:               req.Balance,
-		Concurrency:           req.Concurrency,
-		AllowedGroups:         req.AllowedGroups,
-		SoraStorageQuotaBytes: req.SoraStorageQuotaBytes,
+		Email:         req.Email,
+		Password:      req.Password,
+		Username:      req.Username,
+		Notes:         req.Notes,
+		Balance:       req.Balance,
+		Concurrency:   req.Concurrency,
+		AllowedGroups: req.AllowedGroups,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -216,16 +270,15 @@ func (h *UserHandler) Update(c *gin.Context) {
 
 	// 使用指针类型直接传递，nil 表示未提供该字段
 	user, err := h.adminService.UpdateUser(c.Request.Context(), userID, &service.UpdateUserInput{
-		Email:                 req.Email,
-		Password:              req.Password,
-		Username:              req.Username,
-		Notes:                 req.Notes,
-		Balance:               req.Balance,
-		Concurrency:           req.Concurrency,
-		Status:                req.Status,
-		AllowedGroups:         req.AllowedGroups,
-		GroupRates:            req.GroupRates,
-		SoraStorageQuotaBytes: req.SoraStorageQuotaBytes,
+		Email:         req.Email,
+		Password:      req.Password,
+		Username:      req.Username,
+		Notes:         req.Notes,
+		Balance:       req.Balance,
+		Concurrency:   req.Concurrency,
+		Status:        req.Status,
+		AllowedGroups: req.AllowedGroups,
+		GroupRates:    req.GroupRates,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -294,8 +347,10 @@ func (h *UserHandler) GetUserAPIKeys(c *gin.Context) {
 	}
 
 	page, pageSize := response.ParsePagination(c)
+	sortBy := c.DefaultQuery("sort_by", "created_at")
+	sortOrder := c.DefaultQuery("sort_order", "desc")
 
-	keys, total, err := h.adminService.GetUserAPIKeys(c.Request.Context(), userID, page, pageSize)
+	keys, total, err := h.adminService.GetUserAPIKeys(c.Request.Context(), userID, page, pageSize, sortBy, sortOrder)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

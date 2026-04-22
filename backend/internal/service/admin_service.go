@@ -2,39 +2,44 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/authidentity"
+	"github.com/Wei-Shaw/sub2api/ent/authidentitychannel"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
-	"github.com/Wei-Shaw/sub2api/internal/util/soraerror"
+	"github.com/Wei-Shaw/sub2api/internal/util/httputil"
 )
 
 // AdminService interface defines admin management operations
 type AdminService interface {
 	// User management
-	ListUsers(ctx context.Context, page, pageSize int, filters UserListFilters) ([]User, int64, error)
+	ListUsers(ctx context.Context, page, pageSize int, filters UserListFilters, sortBy, sortOrder string) ([]User, int64, error)
 	GetUser(ctx context.Context, id int64) (*User, error)
 	CreateUser(ctx context.Context, input *CreateUserInput) (*User, error)
 	UpdateUser(ctx context.Context, id int64, input *UpdateUserInput) (*User, error)
 	DeleteUser(ctx context.Context, id int64) error
 	UpdateUserBalance(ctx context.Context, userID int64, balance float64, operation string, notes string) (*User, error)
-	GetUserAPIKeys(ctx context.Context, userID int64, page, pageSize int) ([]APIKey, int64, error)
+	GetUserAPIKeys(ctx context.Context, userID int64, page, pageSize int, sortBy, sortOrder string) ([]APIKey, int64, error)
 	GetUserUsageStats(ctx context.Context, userID int64, period string) (any, error)
 	// GetUserBalanceHistory returns paginated balance/concurrency change records for a user.
 	// codeType is optional - pass empty string to return all types.
 	// Also returns totalRecharged (sum of all positive balance top-ups).
 	GetUserBalanceHistory(ctx context.Context, userID int64, page, pageSize int, codeType string) ([]RedeemCode, int64, float64, error)
+	BindUserAuthIdentity(ctx context.Context, userID int64, input AdminBindAuthIdentityInput) (*AdminBoundAuthIdentity, error)
 
 	// Group management
-	ListGroups(ctx context.Context, page, pageSize int, platform, status, search string, isExclusive *bool) ([]Group, int64, error)
+	ListGroups(ctx context.Context, page, pageSize int, platform, status, search string, isExclusive *bool, sortBy, sortOrder string) ([]Group, int64, error)
 	GetAllGroups(ctx context.Context) ([]Group, error)
 	GetAllGroupsByPlatform(ctx context.Context, platform string) ([]Group, error)
 	GetGroup(ctx context.Context, id int64) (*Group, error)
@@ -54,7 +59,7 @@ type AdminService interface {
 	ReplaceUserGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (*ReplaceUserGroupResult, error)
 
 	// Account management
-	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, int64, error)
+	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error)
 	GetAccount(ctx context.Context, id int64) (*Account, error)
 	GetAccountsByIDs(ctx context.Context, ids []int64) ([]*Account, error)
 	CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error)
@@ -76,8 +81,8 @@ type AdminService interface {
 	CheckMixedChannelRisk(ctx context.Context, currentAccountID int64, currentAccountPlatform string, groupIDs []int64) error
 
 	// Proxy management
-	ListProxies(ctx context.Context, page, pageSize int, protocol, status, search string) ([]Proxy, int64, error)
-	ListProxiesWithAccountCount(ctx context.Context, page, pageSize int, protocol, status, search string) ([]ProxyWithAccountCount, int64, error)
+	ListProxies(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]Proxy, int64, error)
+	ListProxiesWithAccountCount(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]ProxyWithAccountCount, int64, error)
 	GetAllProxies(ctx context.Context) ([]Proxy, error)
 	GetAllProxiesWithAccountCount(ctx context.Context) ([]ProxyWithAccountCount, error)
 	GetProxy(ctx context.Context, id int64) (*Proxy, error)
@@ -92,7 +97,7 @@ type AdminService interface {
 	CheckProxyQuality(ctx context.Context, id int64) (*ProxyQualityCheckResult, error)
 
 	// Redeem code management
-	ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search string) ([]RedeemCode, int64, error)
+	ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search string, sortBy, sortOrder string) ([]RedeemCode, int64, error)
 	GetRedeemCode(ctx context.Context, id int64) (*RedeemCode, error)
 	GenerateRedeemCodes(ctx context.Context, input *GenerateRedeemCodesInput) ([]RedeemCode, error)
 	DeleteRedeemCode(ctx context.Context, id int64) error
@@ -103,14 +108,13 @@ type AdminService interface {
 
 // CreateUserInput represents input for creating a new user via admin operations.
 type CreateUserInput struct {
-	Email                 string
-	Password              string
-	Username              string
-	Notes                 string
-	Balance               float64
-	Concurrency           int
-	AllowedGroups         []int64
-	SoraStorageQuotaBytes int64
+	Email         string
+	Password      string
+	Username      string
+	Notes         string
+	Balance       float64
+	Concurrency   int
+	AllowedGroups []int64
 }
 
 type UpdateUserInput struct {
@@ -124,8 +128,45 @@ type UpdateUserInput struct {
 	AllowedGroups *[]int64 // 使用指针区分"未提供"和"设置为空数组"
 	// GroupRates 用户专属分组倍率配置
 	// map[groupID]*rate，nil 表示删除该分组的专属倍率
-	GroupRates            map[int64]*float64
-	SoraStorageQuotaBytes *int64
+	GroupRates map[int64]*float64
+}
+
+type AdminBindAuthIdentityInput struct {
+	ProviderType    string
+	ProviderKey     string
+	ProviderSubject string
+	Issuer          *string
+	Metadata        map[string]any
+	Channel         *AdminBindAuthIdentityChannelInput
+}
+
+type AdminBindAuthIdentityChannelInput struct {
+	Channel        string
+	ChannelAppID   string
+	ChannelSubject string
+	Metadata       map[string]any
+}
+
+type AdminBoundAuthIdentity struct {
+	UserID          int64                          `json:"user_id"`
+	ProviderType    string                         `json:"provider_type"`
+	ProviderKey     string                         `json:"provider_key"`
+	ProviderSubject string                         `json:"provider_subject"`
+	VerifiedAt      *time.Time                     `json:"verified_at,omitempty"`
+	Issuer          *string                        `json:"issuer,omitempty"`
+	Metadata        map[string]any                 `json:"metadata"`
+	CreatedAt       time.Time                      `json:"created_at"`
+	UpdatedAt       time.Time                      `json:"updated_at"`
+	Channel         *AdminBoundAuthIdentityChannel `json:"channel,omitempty"`
+}
+
+type AdminBoundAuthIdentityChannel struct {
+	Channel        string         `json:"channel"`
+	ChannelAppID   string         `json:"channel_app_id"`
+	ChannelSubject string         `json:"channel_subject"`
+	Metadata       map[string]any `json:"metadata"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
 type CreateGroupInput struct {
@@ -139,16 +180,11 @@ type CreateGroupInput struct {
 	WeeklyLimitUSD   *float64 // 周限额 (USD)
 	MonthlyLimitUSD  *float64 // 月限额 (USD)
 	// 图片生成计费配置（仅 antigravity 平台使用）
-	ImagePrice1K *float64
-	ImagePrice2K *float64
-	ImagePrice4K *float64
-	// Sora 按次计费配置
-	SoraImagePrice360          *float64
-	SoraImagePrice540          *float64
-	SoraVideoPricePerRequest   *float64
-	SoraVideoPricePerRequestHD *float64
-	ClaudeCodeOnly             bool   // 仅允许 Claude Code 客户端
-	FallbackGroupID            *int64 // 降级分组 ID
+	ImagePrice1K    *float64
+	ImagePrice2K    *float64
+	ImagePrice4K    *float64
+	ClaudeCodeOnly  bool   // 仅允许 Claude Code 客户端
+	FallbackGroupID *int64 // 降级分组 ID
 	// 无效请求兜底分组 ID（仅 anthropic 平台使用）
 	FallbackGroupIDOnInvalidRequest *int64
 	// 模型路由配置（仅 anthropic 平台使用）
@@ -157,11 +193,12 @@ type CreateGroupInput struct {
 	MCPXMLInject        *bool
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes []string
-	// Sora 存储配额
-	SoraStorageQuotaBytes int64
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
-	AllowMessagesDispatch bool
-	DefaultMappedModel    string
+	AllowMessagesDispatch       bool
+	DefaultMappedModel          string
+	RequireOAuthOnly            bool
+	RequirePrivacySet           bool
+	MessagesDispatchModelConfig OpenAIMessagesDispatchModelConfig
 	// 从指定分组复制账号（创建分组后在同一事务内绑定）
 	CopyAccountsFromGroupIDs []int64
 }
@@ -178,16 +215,11 @@ type UpdateGroupInput struct {
 	WeeklyLimitUSD   *float64 // 周限额 (USD)
 	MonthlyLimitUSD  *float64 // 月限额 (USD)
 	// 图片生成计费配置（仅 antigravity 平台使用）
-	ImagePrice1K *float64
-	ImagePrice2K *float64
-	ImagePrice4K *float64
-	// Sora 按次计费配置
-	SoraImagePrice360          *float64
-	SoraImagePrice540          *float64
-	SoraVideoPricePerRequest   *float64
-	SoraVideoPricePerRequestHD *float64
-	ClaudeCodeOnly             *bool  // 仅允许 Claude Code 客户端
-	FallbackGroupID            *int64 // 降级分组 ID
+	ImagePrice1K    *float64
+	ImagePrice2K    *float64
+	ImagePrice4K    *float64
+	ClaudeCodeOnly  *bool  // 仅允许 Claude Code 客户端
+	FallbackGroupID *int64 // 降级分组 ID
 	// 无效请求兜底分组 ID（仅 anthropic 平台使用）
 	FallbackGroupIDOnInvalidRequest *int64
 	// 模型路由配置（仅 anthropic 平台使用）
@@ -196,11 +228,12 @@ type UpdateGroupInput struct {
 	MCPXMLInject        *bool
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes *[]string
-	// Sora 存储配额
-	SoraStorageQuotaBytes *int64
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
-	AllowMessagesDispatch *bool
-	DefaultMappedModel    *string
+	AllowMessagesDispatch       *bool
+	DefaultMappedModel          *string
+	RequireOAuthOnly            *bool
+	RequirePrivacySet           *bool
+	MessagesDispatchModelConfig *OpenAIMessagesDispatchModelConfig
 	// 从指定分组复制账号（同步操作：先清空当前分组的账号绑定，再绑定源分组的账号）
 	CopyAccountsFromGroupIDs []int64
 }
@@ -421,14 +454,6 @@ var proxyQualityTargets = []proxyQualityTarget{
 			http.StatusOK: {},
 		},
 	},
-	{
-		Target: "sora",
-		URL:    "https://sora.chatgpt.com/backend/me",
-		Method: http.MethodGet,
-		AllowedStatuses: map[int]struct{}{
-			http.StatusUnauthorized: {},
-		},
-	},
 }
 
 const (
@@ -443,7 +468,6 @@ type adminServiceImpl struct {
 	userRepo             UserRepository
 	groupRepo            GroupRepository
 	accountRepo          AccountRepository
-	soraAccountRepo      SoraAccountRepository // Sora 账号扩展表仓储
 	proxyRepo            ProxyRepository
 	apiKeyRepo           APIKeyRepository
 	redeemCodeRepo       RedeemCodeRepository
@@ -468,7 +492,6 @@ func NewAdminService(
 	userRepo UserRepository,
 	groupRepo GroupRepository,
 	accountRepo AccountRepository,
-	soraAccountRepo SoraAccountRepository,
 	proxyRepo ProxyRepository,
 	apiKeyRepo APIKeyRepository,
 	redeemCodeRepo RedeemCodeRepository,
@@ -487,7 +510,6 @@ func NewAdminService(
 		userRepo:             userRepo,
 		groupRepo:            groupRepo,
 		accountRepo:          accountRepo,
-		soraAccountRepo:      soraAccountRepo,
 		proxyRepo:            proxyRepo,
 		apiKeyRepo:           apiKeyRepo,
 		redeemCodeRepo:       redeemCodeRepo,
@@ -505,11 +527,25 @@ func NewAdminService(
 }
 
 // User management implementations
-func (s *adminServiceImpl) ListUsers(ctx context.Context, page, pageSize int, filters UserListFilters) ([]User, int64, error) {
-	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+func (s *adminServiceImpl) ListUsers(ctx context.Context, page, pageSize int, filters UserListFilters, sortBy, sortOrder string) ([]User, int64, error) {
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	users, result, err := s.userRepo.ListWithFilters(ctx, params, filters)
 	if err != nil {
 		return nil, 0, err
+	}
+	if len(users) > 0 {
+		userIDs := make([]int64, 0, len(users))
+		for i := range users {
+			userIDs = append(userIDs, users[i].ID)
+		}
+		lastUsedByUserID, latestErr := s.userRepo.GetLatestUsedAtByUserIDs(ctx, userIDs)
+		if latestErr != nil {
+			logger.LegacyPrintf("service.admin", "failed to load user last_used_at in batch: err=%v", latestErr)
+		} else {
+			for i := range users {
+				users[i].LastUsedAt = lastUsedByUserID[users[i].ID]
+			}
+		}
 	}
 	// 批量加载用户专属分组倍率
 	if s.userGroupRateRepo != nil && len(users) > 0 {
@@ -555,6 +591,12 @@ func (s *adminServiceImpl) GetUser(ctx context.Context, id int64) (*User, error)
 	if err != nil {
 		return nil, err
 	}
+	lastUsedAt, latestErr := s.userRepo.GetLatestUsedAtByUserID(ctx, id)
+	if latestErr != nil {
+		logger.LegacyPrintf("service.admin", "failed to load user last_used_at: user_id=%d err=%v", id, latestErr)
+	} else {
+		user.LastUsedAt = lastUsedAt
+	}
 	// 加载用户专属分组倍率
 	if s.userGroupRateRepo != nil {
 		rates, err := s.userGroupRateRepo.GetByUserID(ctx, id)
@@ -569,15 +611,14 @@ func (s *adminServiceImpl) GetUser(ctx context.Context, id int64) (*User, error)
 
 func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInput) (*User, error) {
 	user := &User{
-		Email:                 input.Email,
-		Username:              input.Username,
-		Notes:                 input.Notes,
-		Role:                  RoleUser, // Always create as regular user, never admin
-		Balance:               input.Balance,
-		Concurrency:           input.Concurrency,
-		Status:                StatusActive,
-		AllowedGroups:         input.AllowedGroups,
-		SoraStorageQuotaBytes: input.SoraStorageQuotaBytes,
+		Email:         input.Email,
+		Username:      input.Username,
+		Notes:         input.Notes,
+		Role:          RoleUser, // Always create as regular user, never admin
+		Balance:       input.Balance,
+		Concurrency:   input.Concurrency,
+		Status:        StatusActive,
+		AllowedGroups: input.AllowedGroups,
 	}
 	if err := user.SetPassword(input.Password); err != nil {
 		return nil, err
@@ -607,6 +648,15 @@ func (s *adminServiceImpl) assignDefaultSubscriptions(ctx context.Context, userI
 }
 
 func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *UpdateUserInput) (*User, error) {
+	// 校验用户专属分组倍率：必须 > 0（nil 合法，表示清除专属倍率）
+	if input.GroupRates != nil {
+		for groupID, rate := range input.GroupRates {
+			if rate != nil && *rate <= 0 {
+				return nil, fmt.Errorf("rate_multiplier must be > 0 (group_id=%d)", groupID)
+			}
+		}
+	}
+
 	user, err := s.userRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -647,10 +697,6 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 
 	if input.AllowedGroups != nil {
 		user.AllowedGroups = *input.AllowedGroups
-	}
-
-	if input.SoraStorageQuotaBytes != nil {
-		user.SoraStorageQuotaBytes = *input.SoraStorageQuotaBytes
 	}
 
 	if err := s.userRepo.Update(ctx, user); err != nil {
@@ -778,8 +824,8 @@ func (s *adminServiceImpl) UpdateUserBalance(ctx context.Context, userID int64, 
 	return user, nil
 }
 
-func (s *adminServiceImpl) GetUserAPIKeys(ctx context.Context, userID int64, page, pageSize int) ([]APIKey, int64, error) {
-	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+func (s *adminServiceImpl) GetUserAPIKeys(ctx context.Context, userID int64, page, pageSize int, sortBy, sortOrder string) ([]APIKey, int64, error) {
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	keys, result, err := s.apiKeyRepo.ListByUserID(ctx, userID, params, APIKeyListFilters{})
 	if err != nil {
 		return nil, 0, err
@@ -813,9 +859,230 @@ func (s *adminServiceImpl) GetUserBalanceHistory(ctx context.Context, userID int
 	return codes, result.Total, totalRecharged, nil
 }
 
+func (s *adminServiceImpl) BindUserAuthIdentity(ctx context.Context, userID int64, input AdminBindAuthIdentityInput) (*AdminBoundAuthIdentity, error) {
+	if userID <= 0 {
+		return nil, infraerrors.BadRequest("INVALID_INPUT", "user_id must be greater than 0")
+	}
+	if s == nil || s.entClient == nil || s.userRepo == nil {
+		return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_BIND_UNAVAILABLE", "auth identity binding service is unavailable")
+	}
+	if _, err := s.userRepo.GetByID(ctx, userID); err != nil {
+		return nil, err
+	}
+
+	providerType := normalizeAdminAuthIdentityProviderType(input.ProviderType)
+	providerKey := strings.TrimSpace(input.ProviderKey)
+	providerSubject := strings.TrimSpace(input.ProviderSubject)
+	if providerType == "" {
+		return nil, infraerrors.BadRequest("INVALID_INPUT", "provider_type must be one of email, linuxdo, oidc, or wechat")
+	}
+	if providerKey == "" || providerSubject == "" {
+		return nil, infraerrors.BadRequest("INVALID_INPUT", "provider_type, provider_key, and provider_subject are required")
+	}
+
+	var issuer *string
+	if input.Issuer != nil {
+		trimmed := strings.TrimSpace(*input.Issuer)
+		if trimmed != "" {
+			issuer = &trimmed
+		}
+	}
+
+	channelInput := normalizeAdminBindChannelInput(input.Channel)
+	if input.Channel != nil && channelInput == nil {
+		return nil, infraerrors.BadRequest("INVALID_INPUT", "channel, channel_app_id, and channel_subject are required when channel binding is provided")
+	}
+
+	verifiedAt := time.Now().UTC()
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_BIND_TX_FAILED", "failed to start auth identity bind transaction").WithCause(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	identity, err := tx.AuthIdentity.Query().
+		Where(
+			authidentity.ProviderTypeEQ(providerType),
+			authidentity.ProviderKeyEQ(providerKey),
+			authidentity.ProviderSubjectEQ(providerSubject),
+		).
+		Only(ctx)
+	if err != nil && !dbent.IsNotFound(err) {
+		return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_BIND_LOOKUP_FAILED", "failed to inspect auth identity ownership").WithCause(err)
+	}
+	if identity != nil && identity.UserID != userID {
+		return nil, infraerrors.Conflict("AUTH_IDENTITY_OWNERSHIP_CONFLICT", "auth identity already belongs to another user")
+	}
+
+	if identity == nil {
+		create := tx.AuthIdentity.Create().
+			SetUserID(userID).
+			SetProviderType(providerType).
+			SetProviderKey(providerKey).
+			SetProviderSubject(providerSubject).
+			SetVerifiedAt(verifiedAt)
+		if issuer != nil {
+			create = create.SetIssuer(*issuer)
+		}
+		if input.Metadata != nil {
+			create = create.SetMetadata(cloneAdminAuthIdentityMetadata(input.Metadata))
+		}
+		identity, err = create.Save(ctx)
+		if err != nil {
+			return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_BIND_SAVE_FAILED", "failed to save auth identity").WithCause(err)
+		}
+	} else {
+		update := tx.AuthIdentity.UpdateOneID(identity.ID).SetVerifiedAt(verifiedAt)
+		if issuer != nil {
+			update = update.SetIssuer(*issuer)
+		}
+		if input.Metadata != nil {
+			update = update.SetMetadata(cloneAdminAuthIdentityMetadata(input.Metadata))
+		}
+		identity, err = update.Save(ctx)
+		if err != nil {
+			return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_BIND_SAVE_FAILED", "failed to save auth identity").WithCause(err)
+		}
+	}
+
+	var channel *dbent.AuthIdentityChannel
+	if channelInput != nil {
+		channel, err = tx.AuthIdentityChannel.Query().
+			Where(
+				authidentitychannel.ProviderTypeEQ(providerType),
+				authidentitychannel.ProviderKeyEQ(providerKey),
+				authidentitychannel.ChannelEQ(channelInput.Channel),
+				authidentitychannel.ChannelAppIDEQ(channelInput.ChannelAppID),
+				authidentitychannel.ChannelSubjectEQ(channelInput.ChannelSubject),
+			).
+			WithIdentity().
+			Only(ctx)
+		if err != nil && !dbent.IsNotFound(err) {
+			return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_CHANNEL_LOOKUP_FAILED", "failed to inspect auth identity channel ownership").WithCause(err)
+		}
+		if channel != nil && channel.Edges.Identity != nil && channel.Edges.Identity.UserID != userID {
+			return nil, infraerrors.Conflict("AUTH_IDENTITY_CHANNEL_OWNERSHIP_CONFLICT", "auth identity channel already belongs to another user")
+		}
+		if channel == nil {
+			create := tx.AuthIdentityChannel.Create().
+				SetIdentityID(identity.ID).
+				SetProviderType(providerType).
+				SetProviderKey(providerKey).
+				SetChannel(channelInput.Channel).
+				SetChannelAppID(channelInput.ChannelAppID).
+				SetChannelSubject(channelInput.ChannelSubject)
+			if channelInput.Metadata != nil {
+				create = create.SetMetadata(cloneAdminAuthIdentityMetadata(channelInput.Metadata))
+			}
+			channel, err = create.Save(ctx)
+			if err != nil {
+				return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_CHANNEL_SAVE_FAILED", "failed to save auth identity channel").WithCause(err)
+			}
+		} else {
+			update := tx.AuthIdentityChannel.UpdateOneID(channel.ID).SetIdentityID(identity.ID)
+			if channelInput.Metadata != nil {
+				update = update.SetMetadata(cloneAdminAuthIdentityMetadata(channelInput.Metadata))
+			}
+			channel, err = update.Save(ctx)
+			if err != nil {
+				return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_CHANNEL_SAVE_FAILED", "failed to save auth identity channel").WithCause(err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, infraerrors.InternalServer("ADMIN_AUTH_IDENTITY_BIND_COMMIT_FAILED", "failed to commit auth identity bind").WithCause(err)
+	}
+	return buildAdminBoundAuthIdentity(identity, channel), nil
+}
+
+func normalizeAdminBindChannelInput(input *AdminBindAuthIdentityChannelInput) *AdminBindAuthIdentityChannelInput {
+	if input == nil {
+		return nil
+	}
+	channel := &AdminBindAuthIdentityChannelInput{
+		Channel:        strings.TrimSpace(input.Channel),
+		ChannelAppID:   strings.TrimSpace(input.ChannelAppID),
+		ChannelSubject: strings.TrimSpace(input.ChannelSubject),
+		Metadata:       cloneAdminAuthIdentityMetadata(input.Metadata),
+	}
+	if channel.Channel == "" || channel.ChannelAppID == "" || channel.ChannelSubject == "" {
+		return nil
+	}
+	return channel
+}
+
+func normalizeAdminAuthIdentityProviderType(input string) string {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "email":
+		return "email"
+	case "linuxdo":
+		return "linuxdo"
+	case "oidc":
+		return "oidc"
+	case "wechat":
+		return "wechat"
+	default:
+		return ""
+	}
+}
+
+func buildAdminBoundAuthIdentity(identity *dbent.AuthIdentity, channel *dbent.AuthIdentityChannel) *AdminBoundAuthIdentity {
+	if identity == nil {
+		return nil
+	}
+	result := &AdminBoundAuthIdentity{
+		UserID:          identity.UserID,
+		ProviderType:    strings.TrimSpace(identity.ProviderType),
+		ProviderKey:     strings.TrimSpace(identity.ProviderKey),
+		ProviderSubject: strings.TrimSpace(identity.ProviderSubject),
+		VerifiedAt:      identity.VerifiedAt,
+		Issuer:          identity.Issuer,
+		Metadata:        cloneAdminAuthIdentityMetadata(identity.Metadata),
+		CreatedAt:       identity.CreatedAt,
+		UpdatedAt:       identity.UpdatedAt,
+	}
+	if channel != nil {
+		result.Channel = &AdminBoundAuthIdentityChannel{
+			Channel:        strings.TrimSpace(channel.Channel),
+			ChannelAppID:   strings.TrimSpace(channel.ChannelAppID),
+			ChannelSubject: strings.TrimSpace(channel.ChannelSubject),
+			Metadata:       cloneAdminAuthIdentityMetadata(channel.Metadata),
+			CreatedAt:      channel.CreatedAt,
+			UpdatedAt:      channel.UpdatedAt,
+		}
+	}
+	return result
+}
+
+func cloneAdminAuthIdentityMetadata(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	if len(input) == 0 {
+		return map[string]any{}
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		out := make(map[string]any, len(input))
+		for key, value := range input {
+			out[key] = value
+		}
+		return out
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		out = make(map[string]any, len(input))
+		for key, value := range input {
+			out[key] = value
+		}
+	}
+	return out
+}
+
 // Group management implementations
-func (s *adminServiceImpl) ListGroups(ctx context.Context, page, pageSize int, platform, status, search string, isExclusive *bool) ([]Group, int64, error) {
-	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+func (s *adminServiceImpl) ListGroups(ctx context.Context, page, pageSize int, platform, status, search string, isExclusive *bool, sortBy, sortOrder string) ([]Group, int64, error) {
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	groups, result, err := s.groupRepo.ListWithFilters(ctx, params, platform, status, search, isExclusive)
 	if err != nil {
 		return nil, 0, err
@@ -836,6 +1103,10 @@ func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, erro
 }
 
 func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupInput) (*Group, error) {
+	if input.RateMultiplier <= 0 {
+		return nil, errors.New("rate_multiplier must be > 0")
+	}
+
 	platform := input.Platform
 	if platform == "" {
 		platform = PlatformAnthropic
@@ -855,10 +1126,6 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	imagePrice1K := normalizePrice(input.ImagePrice1K)
 	imagePrice2K := normalizePrice(input.ImagePrice2K)
 	imagePrice4K := normalizePrice(input.ImagePrice4K)
-	soraImagePrice360 := normalizePrice(input.SoraImagePrice360)
-	soraImagePrice540 := normalizePrice(input.SoraImagePrice540)
-	soraVideoPrice := normalizePrice(input.SoraVideoPricePerRequest)
-	soraVideoPriceHD := normalizePrice(input.SoraVideoPricePerRequestHD)
 
 	// 校验降级分组
 	if input.FallbackGroupID != nil {
@@ -929,22 +1196,42 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		ImagePrice1K:                    imagePrice1K,
 		ImagePrice2K:                    imagePrice2K,
 		ImagePrice4K:                    imagePrice4K,
-		SoraImagePrice360:               soraImagePrice360,
-		SoraImagePrice540:               soraImagePrice540,
-		SoraVideoPricePerRequest:        soraVideoPrice,
-		SoraVideoPricePerRequestHD:      soraVideoPriceHD,
 		ClaudeCodeOnly:                  input.ClaudeCodeOnly,
 		FallbackGroupID:                 input.FallbackGroupID,
 		FallbackGroupIDOnInvalidRequest: fallbackOnInvalidRequest,
 		ModelRouting:                    input.ModelRouting,
 		MCPXMLInject:                    mcpXMLInject,
 		SupportedModelScopes:            input.SupportedModelScopes,
-		SoraStorageQuotaBytes:           input.SoraStorageQuotaBytes,
 		AllowMessagesDispatch:           input.AllowMessagesDispatch,
+		RequireOAuthOnly:                input.RequireOAuthOnly,
+		RequirePrivacySet:               input.RequirePrivacySet,
 		DefaultMappedModel:              input.DefaultMappedModel,
+		MessagesDispatchModelConfig:     normalizeOpenAIMessagesDispatchModelConfig(input.MessagesDispatchModelConfig),
 	}
+	sanitizeGroupMessagesDispatchFields(group)
 	if err := s.groupRepo.Create(ctx, group); err != nil {
 		return nil, err
+	}
+
+	// require_oauth_only: 过滤掉 apikey 类型账号
+	if group.RequireOAuthOnly && (group.Platform == PlatformOpenAI || group.Platform == PlatformAntigravity || group.Platform == PlatformAnthropic || group.Platform == PlatformGemini) && len(accountIDsToCopy) > 0 {
+		accounts, err := s.accountRepo.GetByIDs(ctx, accountIDsToCopy)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch accounts for oauth filter: %w", err)
+		}
+		oauthIDs := make(map[int64]struct{}, len(accounts))
+		for _, acc := range accounts {
+			if acc.Type != AccountTypeAPIKey {
+				oauthIDs[acc.ID] = struct{}{}
+			}
+		}
+		var filtered []int64
+		for _, aid := range accountIDsToCopy {
+			if _, ok := oauthIDs[aid]; ok {
+				filtered = append(filtered, aid)
+			}
+		}
+		accountIDsToCopy = filtered
 	}
 
 	// 如果有需要复制的账号，绑定到新分组
@@ -1059,6 +1346,9 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 		group.Platform = input.Platform
 	}
 	if input.RateMultiplier != nil {
+		if *input.RateMultiplier <= 0 {
+			return nil, errors.New("rate_multiplier must be > 0")
+		}
 		group.RateMultiplier = *input.RateMultiplier
 	}
 	if input.IsExclusive != nil {
@@ -1086,21 +1376,6 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	if input.ImagePrice4K != nil {
 		group.ImagePrice4K = normalizePrice(input.ImagePrice4K)
-	}
-	if input.SoraImagePrice360 != nil {
-		group.SoraImagePrice360 = normalizePrice(input.SoraImagePrice360)
-	}
-	if input.SoraImagePrice540 != nil {
-		group.SoraImagePrice540 = normalizePrice(input.SoraImagePrice540)
-	}
-	if input.SoraVideoPricePerRequest != nil {
-		group.SoraVideoPricePerRequest = normalizePrice(input.SoraVideoPricePerRequest)
-	}
-	if input.SoraVideoPricePerRequestHD != nil {
-		group.SoraVideoPricePerRequestHD = normalizePrice(input.SoraVideoPricePerRequestHD)
-	}
-	if input.SoraStorageQuotaBytes != nil {
-		group.SoraStorageQuotaBytes = *input.SoraStorageQuotaBytes
 	}
 
 	// Claude Code 客户端限制
@@ -1154,9 +1429,19 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	if input.AllowMessagesDispatch != nil {
 		group.AllowMessagesDispatch = *input.AllowMessagesDispatch
 	}
+	if input.RequireOAuthOnly != nil {
+		group.RequireOAuthOnly = *input.RequireOAuthOnly
+	}
+	if input.RequirePrivacySet != nil {
+		group.RequirePrivacySet = *input.RequirePrivacySet
+	}
 	if input.DefaultMappedModel != nil {
 		group.DefaultMappedModel = *input.DefaultMappedModel
 	}
+	if input.MessagesDispatchModelConfig != nil {
+		group.MessagesDispatchModelConfig = normalizeOpenAIMessagesDispatchModelConfig(*input.MessagesDispatchModelConfig)
+	}
+	sanitizeGroupMessagesDispatchFields(group)
 
 	if err := s.groupRepo.Update(ctx, group); err != nil {
 		return nil, err
@@ -1199,6 +1484,27 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 		// 先清空当前分组的所有账号绑定
 		if _, err := s.groupRepo.DeleteAccountGroupsByGroupID(ctx, id); err != nil {
 			return nil, fmt.Errorf("failed to clear existing account bindings: %w", err)
+		}
+
+		// require_oauth_only: 过滤掉 apikey 类型账号
+		if group.RequireOAuthOnly && (group.Platform == PlatformOpenAI || group.Platform == PlatformAntigravity || group.Platform == PlatformAnthropic || group.Platform == PlatformGemini) && len(accountIDsToCopy) > 0 {
+			accounts, err := s.accountRepo.GetByIDs(ctx, accountIDsToCopy)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch accounts for oauth filter: %w", err)
+			}
+			oauthIDs := make(map[int64]struct{}, len(accounts))
+			for _, acc := range accounts {
+				if acc.Type != AccountTypeAPIKey {
+					oauthIDs[acc.ID] = struct{}{}
+				}
+			}
+			var filtered []int64
+			for _, aid := range accountIDsToCopy {
+				if _, ok := oauthIDs[aid]; ok {
+					filtered = append(filtered, aid)
+				}
+			}
+			accountIDsToCopy = filtered
 		}
 
 		// 再绑定源分组的账号
@@ -1278,6 +1584,11 @@ func (s *adminServiceImpl) ClearGroupRateMultipliers(ctx context.Context, groupI
 func (s *adminServiceImpl) BatchSetGroupRateMultipliers(ctx context.Context, groupID int64, entries []GroupRateMultiplierInput) error {
 	if s.userGroupRateRepo == nil {
 		return nil
+	}
+	for _, e := range entries {
+		if e.RateMultiplier <= 0 {
+			return fmt.Errorf("rate_multiplier must be > 0 (user_id=%d)", e.UserID)
+		}
 	}
 	return s.userGroupRateRepo.SyncGroupRateMultipliers(ctx, groupID, entries)
 }
@@ -1457,15 +1768,11 @@ func (s *adminServiceImpl) ReplaceUserGroup(ctx context.Context, userID, oldGrou
 }
 
 // Account management implementations
-func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, int64, error) {
-	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error) {
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode)
 	if err != nil {
 		return nil, 0, err
-	}
-	now := time.Now()
-	for i := range accounts {
-		syncOpenAICodexRateLimitFromExtra(ctx, s.accountRepo, &accounts[i], now)
 	}
 	return accounts, result.Total, nil
 }
@@ -1508,18 +1815,6 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if len(groupIDs) > 0 && !input.SkipMixedChannelCheck {
 		if err := s.checkMixedChannelRisk(ctx, 0, input.Platform, groupIDs); err != nil {
 			return nil, err
-		}
-	}
-
-	// Sora apikey 账号的 base_url 必填校验
-	if input.Platform == PlatformSora && input.Type == AccountTypeAPIKey {
-		baseURL, _ := input.Credentials["base_url"].(string)
-		baseURL = strings.TrimSpace(baseURL)
-		if baseURL == "" {
-			return nil, errors.New("sora apikey 账号必须设置 base_url")
-		}
-		if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-			return nil, errors.New("base_url 必须以 http:// 或 https:// 开头")
 		}
 	}
 
@@ -1568,22 +1863,35 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		return nil, err
 	}
 
-	// 如果是 Sora 平台账号，自动创建 sora_accounts 扩展表记录
-	if account.Platform == PlatformSora && s.soraAccountRepo != nil {
-		soraUpdates := map[string]any{
-			"access_token":  account.GetCredential("access_token"),
-			"refresh_token": account.GetCredential("refresh_token"),
-		}
-		if err := s.soraAccountRepo.Upsert(ctx, account.ID, soraUpdates); err != nil {
-			// 只记录警告日志，不阻塞账号创建
-			logger.LegacyPrintf("service.admin", "[AdminService] 创建 sora_accounts 记录失败: account_id=%d err=%v", account.ID, err)
-		}
-	}
-
 	// 绑定分组
 	if len(groupIDs) > 0 {
 		if err := s.accountRepo.BindGroups(ctx, account.ID, groupIDs); err != nil {
 			return nil, err
+		}
+	}
+
+	// OAuth 账号：创建后异步设置隐私。
+	// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
+	if account.Type == AccountTypeOAuth {
+		switch account.Platform {
+		case PlatformOpenAI:
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("create_account_openai_privacy_panic", "account_id", account.ID, "recover", r)
+					}
+				}()
+				s.EnsureOpenAIPrivacy(context.Background(), account)
+			}()
+		case PlatformAntigravity:
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("create_account_antigravity_privacy_panic", "account_id", account.ID, "recover", r)
+					}
+				}()
+				s.EnsureAntigravityPrivacy(context.Background(), account)
+			}()
 		}
 	}
 
@@ -1681,18 +1989,6 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	if input.AutoPauseOnExpired != nil {
 		account.AutoPauseOnExpired = *input.AutoPauseOnExpired
-	}
-
-	// Sora apikey 账号的 base_url 必填校验
-	if account.Platform == PlatformSora && account.Type == AccountTypeAPIKey {
-		baseURL, _ := account.Credentials["base_url"].(string)
-		baseURL = strings.TrimSpace(baseURL)
-		if baseURL == "" {
-			return nil, errors.New("sora apikey 账号必须设置 base_url")
-		}
-		if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-			return nil, errors.New("base_url 必须以 http:// 或 https:// 开头")
-		}
 	}
 
 	// 先验证分组是否存在（在任何写操作之前）
@@ -1897,8 +2193,8 @@ func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, 
 }
 
 // Proxy management implementations
-func (s *adminServiceImpl) ListProxies(ctx context.Context, page, pageSize int, protocol, status, search string) ([]Proxy, int64, error) {
-	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+func (s *adminServiceImpl) ListProxies(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]Proxy, int64, error) {
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	proxies, result, err := s.proxyRepo.ListWithFilters(ctx, params, protocol, status, search)
 	if err != nil {
 		return nil, 0, err
@@ -1906,8 +2202,8 @@ func (s *adminServiceImpl) ListProxies(ctx context.Context, page, pageSize int, 
 	return proxies, result.Total, nil
 }
 
-func (s *adminServiceImpl) ListProxiesWithAccountCount(ctx context.Context, page, pageSize int, protocol, status, search string) ([]ProxyWithAccountCount, int64, error) {
-	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+func (s *adminServiceImpl) ListProxiesWithAccountCount(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]ProxyWithAccountCount, int64, error) {
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	proxies, result, err := s.proxyRepo.ListWithFiltersAndAccountCount(ctx, params, protocol, status, search)
 	if err != nil {
 		return nil, 0, err
@@ -2044,8 +2340,8 @@ func (s *adminServiceImpl) CheckProxyExists(ctx context.Context, host string, po
 }
 
 // Redeem code management implementations
-func (s *adminServiceImpl) ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search string) ([]RedeemCode, int64, error) {
-	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+func (s *adminServiceImpl) ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search string, sortBy, sortOrder string) ([]RedeemCode, int64, error) {
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	codes, result, err := s.redeemCodeRepo.ListWithFilters(ctx, params, codeType, status, search)
 	if err != nil {
 		return nil, 0, err
@@ -2297,10 +2593,11 @@ func runProxyQualityTarget(ctx context.Context, client *http.Client, target prox
 		body = body[:proxyQualityMaxBodyBytes]
 	}
 
-	if target.Target == "sora" && soraerror.IsCloudflareChallengeResponse(resp.StatusCode, resp.Header, body) {
+	// Cloudflare challenge 检测
+	if httputil.IsCloudflareChallengeResponse(resp.StatusCode, resp.Header, body) {
 		item.Status = "challenge"
-		item.CFRay = soraerror.ExtractCloudflareRayID(resp.Header, body)
-		item.Message = "Sora 命中 Cloudflare challenge"
+		item.CFRay = httputil.ExtractCloudflareRayID(resp.Header, body)
+		item.Message = "命中 Cloudflare challenge"
 		return item
 	}
 
@@ -2716,16 +3013,14 @@ func (s *adminServiceImpl) ForceOpenAIPrivacy(ctx context.Context, account *Acco
 }
 
 // EnsureAntigravityPrivacy 检查 Antigravity OAuth 账号隐私状态。
-// 如果 Extra["privacy_mode"] 已存在（无论成功或失败），直接跳过。
-// 仅对从未设置过隐私的账号执行 setUserSettings + fetchUserInfo 流程。
-// 用户可通过前端 ForceAntigravityPrivacy（SetPrivacy 按钮）强制重新设置。
+// 仅当 privacy_mode 已成功设置（"privacy_set"）时跳过；
+// 未设置或之前失败（"privacy_set_failed"）均会重试。
 func (s *adminServiceImpl) EnsureAntigravityPrivacy(ctx context.Context, account *Account) string {
 	if account.Platform != PlatformAntigravity || account.Type != AccountTypeOAuth {
 		return ""
 	}
-	// 已设置过则跳过（无论成功或失败），用户可通过 Force 手动重试
 	if account.Extra != nil {
-		if existing, ok := account.Extra["privacy_mode"].(string); ok && existing != "" {
+		if existing, ok := account.Extra["privacy_mode"].(string); ok && existing == AntigravityPrivacySet {
 			return existing
 		}
 	}

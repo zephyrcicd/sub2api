@@ -6,6 +6,30 @@
 import { apiClient } from '../client'
 import type { AdminUser, UpdateUserRequest, PaginatedResponse, ApiKey } from '@/types'
 
+export interface AdminBindAuthIdentityChannelRequest {
+  channel: string
+  channel_app_id?: string
+  channel_subject: string
+  metadata?: Record<string, unknown>
+}
+
+export interface AdminBindAuthIdentityRequest {
+  provider_type: string
+  provider_key: string
+  provider_subject: string
+  issuer?: string
+  metadata?: Record<string, unknown>
+  channel?: AdminBindAuthIdentityChannelRequest
+}
+
+export interface AdminBoundAuthIdentity {
+  identity_id: number
+  provider_type: string
+  provider_key: string
+  provider_subject: string
+  channel_id?: number | null
+}
+
 /**
  * List all users with pagination
  * @param page - Page number (default: 1)
@@ -24,6 +48,8 @@ export async function list(
     group_name?: string         // fuzzy filter by allowed group name
     attributes?: Record<number, string>  // attributeId -> value
     include_subscriptions?: boolean
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
   },
   options?: {
     signal?: AbortSignal
@@ -37,7 +63,9 @@ export async function list(
     role: filters?.role,
     search: filters?.search,
     group_name: filters?.group_name,
-    include_subscriptions: filters?.include_subscriptions
+    include_subscriptions: filters?.include_subscriptions,
+    sort_by: filters?.sort_by,
+    sort_order: filters?.sort_order
   }
 
   // Add attribute filters as attr[id]=value
@@ -244,6 +272,17 @@ export async function replaceGroup(
   return data
 }
 
+export async function bindUserAuthIdentity(
+  userId: number,
+  input: AdminBindAuthIdentityRequest
+): Promise<AdminBoundAuthIdentity> {
+  const { data } = await apiClient.post<AdminBoundAuthIdentity>(
+    `/admin/users/${userId}/auth-identities`,
+    input
+  )
+  return data
+}
+
 export const usersAPI = {
   list,
   getById,
@@ -256,7 +295,8 @@ export const usersAPI = {
   getUserApiKeys,
   getUserUsageStats,
   getUserBalanceHistory,
-  replaceGroup
+  replaceGroup,
+  bindUserAuthIdentity
 }
 
 export default usersAPI
